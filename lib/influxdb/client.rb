@@ -103,7 +103,8 @@ module InfluxDB
       update_database_user(database, username, :admin => admin)
     end
 
-    def write_point(name, data, async=false, time_precision=nil)
+    def write_point(name, data, async=false, time_precision=@time_precision)
+
       data = data.is_a?(Array) ? data : [data]
       columns = data.reduce(:merge).keys.sort {|a,b| a.to_s <=> b.to_s}
       payload = {:name => name, :points => [], :columns => columns}
@@ -123,7 +124,7 @@ module InfluxDB
     end
 
     def _write(payload, time_precision=nil)
-      url = full_url("db/#{@database}/series", "time_precision=#{(time_precision || @time_precision)}")
+      url = full_url("db/#{@database}/series", "time_precision=#{time_precision}")
       data = JSON.generate(payload)
 
       headers = {"Content-Type" => "application/json"}
