@@ -40,7 +40,7 @@ module InfluxDB
       @password = opts[:password] || "root"
       @http = Net::HTTP.new(@host, @port)
       @http.use_ssl = opts[:use_ssl]
-      @time_precision = opts[:time_precision] || "m"
+      @time_precision = opts[:time_precision] || "s"
     end
 
     ## allow options, e.g. influxdb.create_database('foo', replicationFactor: 3)
@@ -99,8 +99,16 @@ module InfluxDB
       get full_url("db/#{database}/users")
     end
 
+    def get_database_user_info(database, username)
+      get full_url("db/#{database}/users/#{username}")
+    end
+
     def alter_database_privilege(database, username, admin=true)
       update_database_user(database, username, :admin => admin)
+    end
+
+    def continuous_queries
+      get full_url("continuous_queries")
     end
 
     def write_point(name, data, async=false, time_precision=@time_precision)
@@ -126,11 +134,7 @@ module InfluxDB
     def _write(payload, time_precision=nil)
       url = full_url("db/#{@database}/series", "time_precision=#{time_precision}")
       data = JSON.generate(payload)
-
-      headers = {"Content-Type" => "application/json"}
-      response = @http.request(Net::HTTP::Post.new(url, headers), data)
-      raise "Write failed with '#{response.message}'" unless (200...300).include?(response.code.to_i)
-      response
+      post(url, data)
     end
 
     def query(query)

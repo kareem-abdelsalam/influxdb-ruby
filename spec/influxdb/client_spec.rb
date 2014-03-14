@@ -19,7 +19,7 @@ describe InfluxDB::Client do
         @influxdb.username.should == "root"
         @influxdb.password.should == "root"
         @influxdb.instance_variable_get(:@http).use_ssl?.should == false
-        @influxdb.time_precision.should == "m"
+        @influxdb.time_precision.should == "s"
       end
     end
 
@@ -29,7 +29,7 @@ describe InfluxDB::Client do
                                          :port => "port",
                                          :username => "username",
                                          :password => "password",
-                                         :time_precision => "s"
+                                         :time_precision => "m"
 
         @influxdb.should be_a InfluxDB::Client
         @influxdb.database.should be_nil
@@ -37,7 +37,7 @@ describe InfluxDB::Client do
         @influxdb.port.should == "port"
         @influxdb.username.should == "username"
         @influxdb.password.should == "password"
-        @influxdb.time_precision.should == "s"
+        @influxdb.time_precision.should == "m"
       end
     end
 
@@ -51,7 +51,7 @@ describe InfluxDB::Client do
         @influxdb.port.should == 8086
         @influxdb.username.should == "root"
         @influxdb.password.should == "root"
-        @influxdb.time_precision.should == "m"        
+        @influxdb.time_precision.should == "s"
       end
     end
 
@@ -61,7 +61,7 @@ describe InfluxDB::Client do
                                                      :port => "port",
                                                      :username => "username",
                                                      :password => "password",
-                                                     :time_precision => "s"
+                                                     :time_precision => "m"
 
         @influxdb.should be_a(InfluxDB::Client)
         @influxdb.database.should == "database"
@@ -69,7 +69,7 @@ describe InfluxDB::Client do
         @influxdb.port.should == "port"
         @influxdb.username.should == "username"
         @influxdb.password.should == "password"
-        @influxdb.time_precision.should == "s"
+        @influxdb.time_precision.should == "m"
       end
     end
 
@@ -214,6 +214,17 @@ describe InfluxDB::Client do
       ).to_return(:body => JSON.generate(user_list, :status => 200))
 
       @influxdb.get_database_user_list("foo").should == user_list
+    end
+  end
+
+  describe "#get_database_user_info" do
+    it "should GET information about a database user" do
+      user_info = {"name" => "bar", "isAdmin" => true}
+      stub_request(:get, "http://influxdb.test:9999/db/foo/users/bar").with(
+        :query => {:u => "username", :p => "password"}
+      ).to_return(:body => JSON.generate(user_info, :status => 200))
+
+      @influxdb.get_database_user_info("foo", "bar").should == user_info
     end
   end
 
