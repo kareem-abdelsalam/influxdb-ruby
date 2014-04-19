@@ -4,16 +4,18 @@ require "uri"
 
 module InfluxDB
   class Worker
+    attr_reader :client
     attr_accessor :queue
 
-    include InfluxDB::Logger
+    include InfluxDB::Logging
 
-    MAX_POST_POINTS = 200
+    MAX_POST_POINTS = 1000
     NUM_WORKER_THREADS = 3
-    SLEEP_INTERVAL = 500
+    SLEEP_INTERVAL = 5
 
-    def initialize
+    def initialize(client)
       @queue = InfluxDB::MaxQueue.new
+      @client = client
       spawn_threads!
     end
 
@@ -23,6 +25,10 @@ module InfluxDB
 
     def current_thread_count
       Thread.list.count {|t| t[:influxdb] == self.object_id}
+    end
+
+    def push(payload)
+      queue.push(payload)
     end
 
     def spawn_threads!
@@ -37,9 +43,9 @@ module InfluxDB
             check_background_queue(thread_num) until @queue.empty?
           end
 
-          while true
-            sleep SLEEP_INTERVAL
+          while !client.stopped?
             self.check_background_queue(thread_num)
+            sleep rand(SLEEP_INTERVAL)
           end
         end
       end
@@ -53,12 +59,14 @@ module InfluxDB
 
         while data.size < MAX_POST_POINTS && !@queue.empty?
           p = @queue.pop(true) rescue next;
-          log :debug, "Found data in the queue! (#{p[:n]})"
           data.push p
         end
 
+        return if data.empty?
+
         begin
-          _write(data)
+          log :debug, "Found data in the queue! (#{data.length} points)"
+          @client._write(data)
         rescue => e
           puts "Cannot write data: #{e.inspect}"
         end

@@ -5,10 +5,18 @@ require 'json'
 
 module InfluxDB
   class Client
-    attr_accessor :host, :port, :username, :password, :database, :time_precision
+    attr_accessor :hosts,
+                  :port,
+                  :username,
+                  :password,
+                  :database,
+                  :time_precision,
+                  :use_ssl,
+                  :stopped
+
     attr_accessor :queue, :worker
 
-    include InfluxDB::Logger
+    include InfluxDB::Logging
 
     # Initializes a new InfluxDB client
     #
@@ -34,13 +42,21 @@ module InfluxDB
     def initialize *args
       @database = args.first if args.first.is_a? String
       opts = args.last.is_a?(Hash) ? args.last : {}
-      @host = opts[:host] || "localhost"
+      @hosts = Array(opts[:hosts] || opts[:host] || ["localhost"])
       @port = opts[:port] || 8086
       @username = opts[:username] || "root"
       @password = opts[:password] || "root"
-      @http = Net::HTTP.new(@host, @port)
-      @http.use_ssl = opts[:use_ssl]
+      @use_ssl = opts[:use_ssl] || false
       @time_precision = opts[:time_precision] || "s"
+      @initial_delay = opts[:initial_delay] || 0.01
+      @max_delay = opts[:max_delay] || 30
+      @open_timeout = opts[:write_timeout] || 5
+      @read_timeout = opts[:read_timeout] || 300
+      @async = opts[:async] || false
+
+      @worker = InfluxDB::Worker.new(self) if @async
+
+      at_exit { stop! }
     end
 
     ## allow options, e.g. influxdb.create_database('foo', replicationFactor: 3)
@@ -107,12 +123,11 @@ module InfluxDB
       update_database_user(database, username, :admin => admin)
     end
 
-    def continuous_queries
-      get full_url("continuous_queries")
+    def continuous_queries(database)
+      get full_url("db/#{database}/continuous_queries")
     end
 
-    def write_point(name, data, async=false, time_precision=@time_precision)
-
+    def write_point(name, data, async=@async, time_precision=@time_precision)
       data = data.is_a?(Array) ? data : [data]
       columns = data.reduce(:merge).keys.sort {|a,b| a.to_s <=> b.to_s}
       payload = {:name => name, :points => [], :columns => columns}
@@ -124,21 +139,20 @@ module InfluxDB
       end
 
       if async
-        @worker = InfluxDB::Worker.new if @worker.nil?
-        @worker.queue.push(payload)
+        worker.push(payload)
       else
         _write([payload], time_precision)
       end
     end
 
-    def _write(payload, time_precision=nil)
+    def _write(payload, time_precision=@time_precision)
       url = full_url("db/#{@database}/series", "time_precision=#{time_precision}")
       data = JSON.generate(payload)
       post(url, data)
     end
 
-    def query(query)
-      url = URI.encode full_url("db/#{@database}/series", "q=#{query}")
+    def query(query, time_precision=@time_precision)
+      url = URI.encode full_url("db/#{@database}/series", "q=#{query}&time_precision=#{time_precision}")
       series = get(url)
 
       if block_given?
@@ -153,6 +167,14 @@ module InfluxDB
       end
     end
 
+    def stop!
+      @stopped = true
+    end
+
+    def stopped?
+      @stopped
+    end
+
     private
     def full_url(path, params=nil)
       "".tap do |url|
@@ -162,36 +184,69 @@ module InfluxDB
     end
 
     def get(url)
-      response = @http.request(Net::HTTP::Get.new(url))
-      if response.kind_of? Net::HTTPSuccess
-        return JSON.parse(response.body)
-      elsif response.kind_of? Net::HTTPUnauthorized
-        raise InfluxDB::AuthenticationError.new response.body
-      else
-        raise InfluxDB::Error.new response.body
+      connect_with_retry do |http|
+        response = http.request(Net::HTTP::Get.new(url))
+        if response.kind_of? Net::HTTPSuccess
+          return JSON.parse(response.body)
+        elsif response.kind_of? Net::HTTPUnauthorized
+          raise InfluxDB::AuthenticationError.new response.body
+        else
+          raise InfluxDB::Error.new response.body
+        end
       end
     end
 
     def post(url, data)
       headers = {"Content-Type" => "application/json"}
-      response = @http.request(Net::HTTP::Post.new(url, headers), data)
-      if response.kind_of? Net::HTTPSuccess
-        return response
-      elsif response.kind_of? Net::HTTPUnauthorized
-        raise InfluxDB::AuthenticationError.new response.body
-      else
-        raise InfluxDB::Error.new response.body
+      connect_with_retry do |http|
+        response = http.request(Net::HTTP::Post.new(url, headers), data)
+        if response.kind_of? Net::HTTPSuccess
+          return response
+        elsif response.kind_of? Net::HTTPUnauthorized
+          raise InfluxDB::AuthenticationError.new response.body
+        else
+          raise InfluxDB::Error.new response.body
+        end
       end
     end
 
     def delete(url)
-      response = @http.request(Net::HTTP::Delete.new(url))
-      if response.kind_of? Net::HTTPSuccess
-        return response
-      elsif response.kind_of? Net::HTTPUnauthorized
-        raise InfluxDB::AuthenticationError.new response.body
-      else
-        raise InfluxDB::Error.new response.body
+      connect_with_retry do |http|
+        response = http.request(Net::HTTP::Delete.new(url))
+        if response.kind_of? Net::HTTPSuccess
+          return response
+        elsif response.kind_of? Net::HTTPUnauthorized
+          raise InfluxDB::AuthenticationError.new response.body
+        else
+          raise InfluxDB::Error.new response.body
+        end
+      end
+    end
+
+    def connect_with_retry(&block)
+      hosts = @hosts.dup
+      delay = @initial_delay
+
+      begin
+        hosts.push(host = hosts.shift)
+        http = Net::HTTP.new(host, @port)
+        http.open_timeout = @open_timeout
+        http.read_timeout = @read_timeout
+        http.use_ssl = @use_ssl
+        block.call(http)
+
+      rescue Timeout::Error, *InfluxDB::NET_HTTP_EXCEPTIONS => e
+        log :error, "Failed to contact host #{host}: #{e.inspect} #{"- retrying in #{delay}s." unless stopped?}"
+        log :info, "Queue size is #{@queue.length}." unless @queue.nil?
+        if stopped?
+          raise e
+        else
+          sleep delay
+          delay = [@max_delay, delay * 2].min
+          retry
+        end
+      ensure
+        http.finish if http.started?
       end
     end
 
@@ -206,6 +261,16 @@ module InfluxDB
           InfluxDB::PointValue.new(value).load
         end
         Hash[columns.zip(decoded_point)]
+      end
+    end
+
+    WORKER_MUTEX = Mutex.new
+    def worker
+      return @worker if @worker
+      WORKER_MUTEX.synchronize do
+        #this return is necessary because the previous mutex holder might have already assigned the @worker
+        return @worker if @worker
+        @worker = InfluxDB::Worker.new(self)
       end
     end
   end
